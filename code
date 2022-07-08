@@ -1,0 +1,270 @@
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import r2_score
+from sklearn.model_selection import LeaveOneOut
+from sklearn.preprocessing import StandardScaler
+
+
+%matplotlib inline
+%config Completer.use_jedi = False
+
+
+### Load dataset
+dataset = []
+num_hurdles = 10
+
+with open("./python/110m hurdle predict.csv") as f:
+    f.readline()  # remove header
+    for l in f:
+        race = list(map(float, l.split(",")))
+        dataset.append(race)
+dataset = np.array(dataset)        
+# from the Table 2 of Miyashiro et al. 
+miyashiro_coefficinents = [
+    [0.1159, 1.0385],  # 1st touchdown
+    [0.1778, 1.2742],  # 2nd
+    [0.2554, 1.2722],  # 3
+    [0.3357, 1.2294],
+    [0.4267, 1.0371],
+    [0.5124, 0.9236],
+    [0.6099, 0.6509],
+    [0.7069, 0.3953],
+    [0.8019, 0.1799],
+    [0.8961, -0.0120]  # 10th touchdown
+]
+
+miyashiro_coefficinents = np.array(miyashiro_coefficinents)
+race_times = dataset[:, 0]
+touchdown_lists = dataset[:, 1:]
+
+print(
+    "the number of races: {}, the number of touchdowns: {}".format(
+        *touchdown_lists.shape
+    ))
+def linear_regression(X_train, y_train, X_test):
+    # Fit linear regression and return prediction of a touchdown time given `X_test`,
+    # and model's coefficients and intercept for analysis.
+    
+    model = LinearRegression()
+    model.fit(X_train, y_train)
+    return model.predict(X_test)[0], model.coef_, model.intercept_
+
+prediction_results = {}
+equation_results = {}
+
+
+
+## Fitting
+### Miyashiro et al.
+Given race time, predict each touchdown time with linear regression
+predictions = []
+loo = LeaveOneOut()
+for _, test_index in loo.split(race_times, touchdown_lists):
+
+    X_test = race_times[test_index]
+    X_test = np.concatenate([X_test, [1.]])
+
+    predictions.append(miyashiro_coefficinents.dot(X_test))
+    
+prediction_results["Miyashiro et al."] = np.array(predictions)
+
+### Fitting on our dataset
+predictions = []
+equations = []
+loo = LeaveOneOut()
+for train_indices, test_index in loo.split(race_times, touchdown_lists):
+
+    y_train = touchdown_lists[train_indices]
+
+    X_train = race_times[train_indices].reshape(-1, 1)
+    X_test = race_times[test_index].reshape(-1, 1)
+
+    predicted_touchdowns_per_player, coeff, intercept = linear_regression(X_train, y_train, X_test)
+
+    weights = np.full((num_hurdles, 2), np.NaN)  # num_hurdles + race_time + intercept
+    weights[:, 1] = intercept
+    weights[:, 0] = coeff.flatten()
+        
+    predictions.append(predicted_touchdowns_per_player)
+    equations.append(weights)
+    
+prediction_results["Proposed"] = np.array(predictions)
+equation_results["Proposed"] = np.array(equations)
+### Calculate averaged linear equation
+equations_data = []
+for method, learned_weights in equation_results.items():
+
+    mean_weights = learned_weights.mean(axis=0)
+    std_weights = learned_weights.std(axis=0)
+    
+    for target_touchdown_position, (mean, std) in enumerate(zip(mean_weights, std_weights), start=1):
+
+
+        equations_data.append(
+            ["mean", target_touchdown_position] + list(mean)
+        )
+        equations_data.append(
+            ["std", target_touchdown_position] + list(std)
+        )        
+
+        
+df = pd.DataFrame(
+    np.array(equations_data),
+    columns=["stat_type", "target touchdown", "race time coeff.", "intercept"],
+    
+)
+df["target touchdown"] = df["target touchdown"].astype(int)
+df = df.sort_values(["target touchdown"])
+# df.to_csv("weights.csv")
+df
+### Evaluation: calculate $R^2$, MSE, and MAE
+r2_results = []
+mse_results = []
+mae_results = []
+
+
+for method, predicted_scores in prediction_results.items():
+    if "Proposed_scaled" in method:
+        continue
+
+    r2_results_per_touchdown = []
+    mse_results_per_touchdown = []
+    mae_results_per_touchdown = []    
+
+    
+    for c in range(num_hurdles):
+
+        r2_results_per_touchdown.append(
+            r2_score(touchdown_lists[:, c], predicted_scores[:, c])
+        )        
+        mse_results_per_touchdown.append(
+            mean_squared_error(touchdown_lists[:, c], predicted_scores[:, c])
+        )
+        mae_results_per_touchdown.append(
+            mean_absolute_error(touchdown_lists[:, c], predicted_scores[:, c])
+        )        
+
+
+    r2_results.append(r2_results_per_touchdown + [np.mean(r2_results_per_touchdown), np.std(r2_results_per_touchdown)])
+    mse_results.append(mse_results_per_touchdown + [np.mean(mse_results_per_touchdown), np.std(mse_results_per_touchdown)])
+    mae_results.append(mae_results_per_touchdown + [np.mean(mae_results_per_touchdown), np.std(mae_results_per_touchdown)])    
+
+### Fitting on scaled data and evaluation
+predictions = []
+true_values = []
+loo = LeaveOneOut()
+
+for train_indices, test_index in loo.split(race_times, touchdown_lists):
+
+    y_train = touchdown_lists[train_indices]
+    X_train = race_times[train_indices].reshape(-1, 1)
+    X_test = race_times[test_index].reshape(-1, 1)
+    
+    scaler = StandardScaler()
+    y_train = scaler.fit_transform(y_train)
+    
+    predicted_touchdowns_per_player, coeff, intercept = linear_regression(X_train, y_train, X_test)
+        
+    predictions.append(predicted_touchdowns_per_player)
+    scaled_test_target = scaler.transform(touchdown_lists[test_index])
+    true_values.extend(scaled_test_target)
+
+    
+predictions = np.array(predictions)
+true_values = np.array(true_values)
+
+r2_results_per_touchdown = []
+mse_results_per_touchdown = []
+mae_results_per_touchdown = []    
+
+
+for c in range(num_hurdles):
+
+    r2_results_per_touchdown.append(
+        r2_score(true_values[:, c], predictions[:, c])
+    )        
+    mse_results_per_touchdown.append(
+        mean_squared_error(true_values[:, c], predictions[:, c])
+    )
+    mae_results_per_touchdown.append(
+        mean_absolute_error(true_values[:, c], predictions[:, c])
+    )        
+
+
+r2_results.append(r2_results_per_touchdown + [np.mean(r2_results_per_touchdown), np.std(r2_results_per_touchdown)])
+mse_results.append(mse_results_per_touchdown + [np.mean(mse_results_per_touchdown), np.std(mse_results_per_touchdown)])
+mae_results.append(mae_results_per_touchdown + [np.mean(mae_results_per_touchdown), np.std(mae_results_per_touchdown)])    
+
+### MSE
+index = ("Miyashiro et al.", "Proposed", "Proposed_scaled")
+print("MSE")
+pd.DataFrame(
+    np.array(mse_results),
+    columns=[f"{c}H" for c in range(1, 11)] + ["avg.", "std"], index=index
+)
+
+## MAE
+pd.DataFrame(
+    np.array(mae_results),
+    columns=[f"{c}H" for c in range(1, 11)] + ["avg.", "std"], index=index
+)
+
+### $R^2$
+pd.DataFrame(
+    np.array(r2_results),
+    columns=[f"{c}H" for c in range(1, 11)] + ["avg.", "std"], index=index
+)
+
+
+
+## Interval speed
+intervals = np.ones(9) * 9.14
+intervals
+labels = index
+num_neibhgours = 3
+data = []
+x = np.arange(1, 10)
+
+for player_id, (true_touchdown_list, race_time) in enumerate(zip(touchdown_lists, race_times), start=1):
+
+    start_id = max(player_id-num_neibhgours, 0)
+    end_id = min(player_id+num_neibhgours+1, len(touchdown_lists))
+
+    averaged_true_touchdowns = touchdown_lists[start_id:end_id].mean(axis=0)
+
+    substract = np.roll(averaged_true_touchdowns, 1)[1:]    
+    speed = intervals / (averaged_true_touchdowns[1:] - substract)
+
+    plt.plot(x, speed, "-", label="True")
+
+    time = race_times[start_id:end_id].mean(axis=0)    
+
+    data_per_player = [player_id, time]
+    data_per_player += list(speed)    
+    for label, predicted in prediction_results.items():
+        averaged_pred_touchdowns = predicted[start_id:end_id].mean(axis=0)    
+        substract = np.roll(averaged_pred_touchdowns, 1)[1:]
+        speed = intervals / (averaged_pred_touchdowns[1:] - substract)
+        data_per_player += list(speed)
+        plt.plot(x, speed, "--", label=label)
+
+    plt.title(f"{player_id}: {time}sec")
+    plt.legend()
+
+    plt.show()
+    data.append(np.array(data_per_player))
+
+df = pd.DataFrame(
+    np.array(data),
+    columns=["player_id", "average_time"] + 
+    [f"{i}th interval ({method})" for method in ["True", "Miyashiro et al.", "Proposed"] for i in range(1, 10) ],
+)
+df["player_id"] = df["player_id"].astype(int)
+df = df.sort_values(["player_id"])
+df.to_csv("average_speed.csv")
+df
+
